@@ -10,7 +10,9 @@ const { ObjectId } = require("mongodb");
 const SSLCommerzPayment = require('sslcommerz-lts')
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
-
+const store_id = process.env.STORE_ID;
+const store_passwd = process.env.STORE_PASS;
+const is_live = false
 
 const crypto = require("crypto");
 
@@ -23,15 +25,17 @@ const generateTrackingId = () => {
 
   const random = crypto.randomBytes(4).toString("hex").toUpperCase();
 
-  return `ZPS-${date}-${random}`;
+  return `MPS-${date}-${random}`;
 };
 
 console.log(generateTrackingId());
 
 
+
 //middleware
 app.use(express.json());
 app.use(cors());
+app.use(express.urlencoded({ extended: true}))
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.onvejqf.mongodb.net/?appName=Cluster0`;
 
@@ -44,9 +48,6 @@ const client = new MongoClient(uri, {
   },
 });
 
-const store_id = process.env.STORE_ID;
-const store_passwd = process.env.STORE_PASS;
-const is_live = false
 
 async function run() {
   try {
@@ -97,11 +98,11 @@ async function run() {
 
 
     ////payment related api
-    app.get("/payments", async(req, res)=>{
+    app.get("/payments", async (req, res) => {
       const email = req.query.email;
       const query = {};
-      if(email) {
-        query.customerEmail= email;
+      if (email) {
+        query.customerEmail = email;
       }
       const cursor = paymentCollection.find(query);
       const result = await cursor.toArray();
@@ -109,9 +110,185 @@ async function run() {
     })
 
     //payment related api--sslcommerz
-    app.post("", async (req, res) => {
+    // app.post("/sslcommerz/init", async (req, res) => {
+    //   const paymentInfo = req.body;
 
-    })
+    //   const data = {
+    //     total_amount: Number(paymentInfo.cost),
+    //     currency: 'BDT',
+    //     tran_id: tran_id, // use unique tran_id for each api call
+    //     success_url: `${process.env.SITE_DOMAIN}/dashboard/payment/success/${tran_id}`,
+    //     fail_url: `${process.env.SITE_DOMAIN}/fail`,
+    //     cancel_url: `${process.env.SITE_DOMAIN}/cancel`,
+    //     ipn_url: `${process.env.SITE_DOMAIN}/ipn`,
+    //     shipping_method: 'Courier',
+    //     product_name: paymentInfo.parcelName,
+    //     product_category: "Courier",
+    //     product_profile: "general",
+
+    //     cus_name: paymentInfo.senderName,
+    //     cus_email: paymentInfo.senderEmail,
+    //     cus_add1: paymentInfo.senderAddress,
+    //     cus_city: paymentInfo.senderDistrict,
+    //     cus_state: paymentInfo.senderRegion,
+    //     cus_postcode: "1000",
+    //     cus_country: 'Bangladesh',
+    //     cus_phone: paymentInfo.senderPhone,
+
+    //     ship_name: paymentInfo.receiverName,
+    //     ship_add1: paymentInfo.receiverAddress,
+    //     ship_city: paymentInfo.receiverDistrict,
+    //     ship_state: paymentInfo.receiverRegion,
+    //     ship_postcode: "1000",
+    //     ship_country: 'Bangladesh',
+    //   };
+
+    //   console.log("TRANSACTION ID:", tran_id);
+    //   console.log("SUCCESS URL:", data.success_url);
+    //   // console.log("data", data);
+    //   const sslcz = new SSLCommerzPayment(
+    //     store_id,
+    //     store_passwd,
+    //     is_live
+    //   );
+    //   const apiResponse = await sslcz.init(data);
+
+    //   // console.log("SSLCommerz response:", apiResponse);
+
+    //   res.send({
+    //     success: true,
+    //     url: apiResponse.GatewayPageURL,
+    //     transactionId: data.tran_id,
+    //   });
+
+
+
+
+
+
+
+    // })
+
+    app.post("/sslcommerz-payment", async (req, res) => {
+      const paymentInfo = req.body;
+
+      const tran_id = crypto.randomBytes(16).toString("hex");
+
+      const data = {
+        total_amount: Number(paymentInfo.cost),
+        currency: "BDT",
+        tran_id,
+
+        success_url: `${process.env.SERVER_DOMAIN}/payment/success/${tran_id}`,
+        fail_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+        ipn_url: `${process.env.SITE_DOMAIN}/payment/ipn`,
+
+        shipping_method: "Courier",
+        product_name: paymentInfo.parcelName,
+        product_category: "Courier",
+        product_profile: "general",
+
+        cus_name: paymentInfo.senderName,
+        cus_email: paymentInfo.senderEmail,
+        cus_add1: paymentInfo.senderAddress,
+        cus_city: paymentInfo.senderDistrict,
+        cus_state: paymentInfo.senderRegion,
+        cus_postcode: "1000",
+        cus_country: "Bangladesh",
+        cus_phone: paymentInfo.senderPhone,
+
+        ship_name: paymentInfo.receiverName,
+        ship_add1: paymentInfo.receiverAddress,
+        ship_city: paymentInfo.receiverDistrict,
+        ship_state: paymentInfo.receiverRegion,
+        ship_postcode: "1000",
+        ship_country: "Bangladesh",
+      };
+
+      console.log("TRANSACTION ID:", tran_id);
+      console.log("SUCCESS URL:", data.success_url);
+
+      const sslcz = new SSLCommerzPayment(
+        store_id,
+        store_passwd,
+        is_live
+      );
+
+      const apiResponse = await sslcz.init(data);
+
+      console.log("SSL RESPONSE:", apiResponse);
+
+      res.send({
+        success: true,
+        url: apiResponse.GatewayPageURL,
+        transactionId: tran_id,
+      });
+    });
+
+    // app.post("/payment/success/:tranId", async (req, res) => {
+    //   const tranId = req.params.tranId;
+
+    //   console.log("Payment Successful");
+    //   console.log("TransactionId", tranId);
+
+    //   res.redirect(
+    //     `${process.env.SITE_DOMAIN}/dashboard/payment/success/${tranId}`
+    //   );
+    // });
+
+    app.post("/payment/success/:tranId", async (req, res) => {
+      try {
+        const tranId = req.params.tranId;
+        console.log({sslData: req.body});
+        
+        // const val_id = req.body.val_id;
+
+        console.log("SSLCommerz payment successful");
+        console.log("Transaction ID:", tranId);
+
+        const sslcz = new SSLCommerzPayment(
+          store_id,
+          store_passwd,
+          is_live
+        );
+
+        // sslcz.validate(data).then(data => {
+        //   //process the response that got from sslcommerz 
+        //   // https://developer.sslcommerz.com/doc/v4/#order-validation-api
+        // });
+
+        res.redirect(
+          `${process.env.SITE_DOMAIN}/dashboard/payment/success/${tranId}`
+        );
+      } catch (error) {
+        console.error(error);
+
+        res.status(500).send({
+          message: "Something went wrong",
+        });
+      }
+    });
+
+
+    app.patch("/payment/success/:tranId", async (req, res) => {
+      const tranId = req.params.tranId;
+
+      console.log("SSL transaction:", tranId);
+
+      // Find payment
+      // Verify SSLCommerz
+      // Update payment
+      // Update parcel
+
+      res.send({
+        transactionId: tranId,
+        trackingId: "YOUR_TRACKING_ID",
+      });
+    });
+
+
+
 
     //payment related api--Stripe
     app.post("/payment-checkout-session", async (req, res) => {
@@ -119,11 +296,15 @@ async function run() {
       const amount = parseInt(paymentInfo.cost) * 100;
 
       const session = await stripe.checkout.sessions.create({
+        adaptive_pricing: {
+          enabled: false,
+        },
+
         line_items: [
           {
             // Provide the exact Price ID (for example, price_1234) of the product you want to sell
             price_data: {
-              currency: 'usd',
+              currency: 'USD',
               unit_amount: amount,
               product_data: {
                 name: paymentInfo.parcelName
@@ -154,12 +335,12 @@ async function run() {
       // console.log("session retrieve", session);
 
       const transactionId = session.payment_intent;
-      const query = {transactionId: transactionId};
+      const query = { transactionId: transactionId };
       const paymentExist = await paymentCollection.findOne(query);
 
-      if(paymentExist) {
-        return res.send({ 
-          message:"already exists", 
+      if (paymentExist) {
+        return res.send({
+          message: "already exists",
           transactionId,
           trackingId: paymentExist.trackingId
         })
@@ -205,7 +386,7 @@ async function run() {
       res.send({ success: false })
     })
 
-   
+
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
