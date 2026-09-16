@@ -32,6 +32,8 @@ console.log(generateTrackingId());
 
 
 
+
+
 //middleware
 app.use(express.json());
 app.use(cors());
@@ -57,6 +59,78 @@ async function run() {
     const db = client.db("moveNestDB");
     const parcelsCollection = db.collection("parcels");
     const paymentCollection = db.collection("payments")
+
+
+    const validateAndUpdatePayment = async ({
+      val_id,
+      value_a,
+      tran_id,
+      bank_tran_id,
+    }) => {
+      if (!val_id) {
+        throw new Error("Validation ID missing");
+      }
+
+      if (!value_a) {
+        throw new Error("Parcel ID missing");
+      }
+
+      if (!ObjectId.isValid(value_a)) {
+        throw new Error("Invalid parcel ID");
+      }
+
+      const sslcz = new SSLCommerzPayment(
+        store_id,
+        store_passwd,
+        is_live
+      );
+
+      const validationResponse = await sslcz.validate({
+        val_id,
+      });
+
+      console.log(
+        "Validation Response:",
+        validationResponse
+      );
+
+      if (
+        validationResponse.status !== "VALID" &&
+        validationResponse.status !== "VALIDATED"
+      ) {
+        throw new Error("Payment validation failed");
+      }
+
+      const result = await parcelsCollection.updateOne(
+        {
+          _id: new ObjectId(value_a),
+        },
+        {
+          $set: {
+            paymentStatus: "paid",
+
+            transactionId: tran_id,
+
+            sslValId: val_id,
+
+            sslStatus:
+              validationResponse.status,
+
+            sslBankTranId:
+              bank_tran_id || null,
+
+            paidAt: new Date(),
+          },
+        }
+      );
+
+      console.log(
+        "Database Update:",
+        result
+      );
+
+      return validationResponse;
+    };
 
     ////parcel api
     app.get("/parcels", async (req, res) => {
@@ -139,9 +213,9 @@ async function run() {
         value_a: paymentInfo.parcelId,
 
         success_url: `${process.env.SERVER_DOMAIN}/payment/success/${tran_id}`,
-        fail_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
-        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
-        ipn_url: `${process.env.SITE_DOMAIN}/payment/ipn`,
+        fail_url: `${process.env.SERVER_DOMAIN}/payment/fail`,
+        cancel_url: `${process.env.SERVER_DOMAIN}/payment/cancelled`,
+        ipn_url: `${process.env.SERVER_DOMAIN}/payment/ipn`,
 
         shipping_method: "Courier",
         product_name: paymentInfo.parcelName,
@@ -153,7 +227,7 @@ async function run() {
         cus_add1: paymentInfo.senderAddress,
         cus_city: paymentInfo.senderDistrict,
         cus_state: paymentInfo.senderRegion,
-        cus_postcode: "1000",
+        cus_postcode: paymentInfo.senderPostalCode,
         cus_country: "Bangladesh",
         cus_phone: paymentInfo.senderPhone,
 
@@ -161,7 +235,7 @@ async function run() {
         ship_add1: paymentInfo.receiverAddress,
         ship_city: paymentInfo.receiverDistrict,
         ship_state: paymentInfo.receiverRegion,
-        ship_postcode: "1000",
+        ship_postcode: paymentInfo.receiverPostalCode,
         ship_country: "Bangladesh",
       };
 
@@ -176,7 +250,16 @@ async function run() {
 
       const apiResponse = await sslcz.init(data);
 
-      console.log("SSL RESPONSE:", apiResponse);
+      // console.log("SSL RESPONSE:", apiResponse);
+
+      if (!apiResponse?.GatewayPageURL) {
+        return res.status(400).send({
+          success: false,
+          message:
+            apiResponse?.failedreason ||
+            "SSLCOMMERZ payment initialization failed",
+        });
+      }
 
       res.send({
         success: true,
@@ -243,27 +326,62 @@ async function run() {
     app.post("/payment/success/:tranId", async (req, res) => {
       const tranId = req.params.tranId;
 
+      console.log("SSL Response:", req.body);
+
       const {
+        tran_id,
         val_id,
-        status,
         bank_tran_id,
         value_a,
       } = req.body;
 
-      console.log("SSL Response:", req.body);
-
-      if (!value_a) {
+      // -----------------------------
+      // 1. Check transaction ID
+      // -----------------------------
+      if (!tran_id || tran_id !== tranId) {
         return res.status(400).send({
-          message: "Parcel ID not found",
+          success: false,
+          message: "Transaction ID mismatch",
         });
       }
 
+      // -----------------------------
+      // 2. Check parcel ID
+      // -----------------------------
+      if (!value_a || !ObjectId.isValid(value_a)) {
+        return res.status(400).send({
+          success: false,
+          message: "Invalid parcel ID",
+        });
+      }
+
+      // -----------------------------
+      // 3. Check validation ID
+      // -----------------------------
       if (!val_id) {
         return res.status(400).send({
-          message: "SSLCommerz validation ID not found",
+          success: false,
+          message: "Validation ID missing",
         });
       }
 
+      // -----------------------------
+      // 4. Find parcel
+      // -----------------------------
+      const parcel = await parcelsCollection.findOne({
+        _id: new ObjectId(value_a),
+      });
+
+      if (!parcel) {
+        return res.status(404).send({
+          success: false,
+          message: "Parcel not found",
+        });
+      }
+
+      // -----------------------------
+      // 5. Validate payment
+      // -----------------------------
       const sslcz = new SSLCommerzPayment(
         store_id,
         store_passwd,
@@ -271,18 +389,28 @@ async function run() {
       );
 
       const validationResponse = await sslcz.validate({
-        val_id: val_id,
+        val_id,
       });
 
-      console.log("Validation response:", validationResponse);
+      console.log(
+        "VALIDATION RESPONSE:",
+        validationResponse
+      );
 
-      if (validationResponse.status !== "VALID") {
+      // -----------------------------
+      // 6. Check validation
+      // -----------------------------
+      if (
+        validationResponse.status !== "VALID" &&
+        validationResponse.status !== "VALIDATED"
+      ) {
         await parcelsCollection.updateOne(
-          { _id: new ObjectId(value_a) },
+          {
+            _id: new ObjectId(value_a),
+          },
           {
             $set: {
               paymentStatus: "failed",
-              sslStatus: validationResponse.status,
             },
           }
         );
@@ -293,43 +421,303 @@ async function run() {
         });
       }
 
-      // Payment is verified
-      const result = await parcelsCollection.updateOne(
-        { _id: new ObjectId(value_a) },
-        {
-          $set: {
-            transactionId: tranId,
-            sslValId: val_id,
-            sslStatus: validationResponse.status,
-            sslBankTranId: bank_tran_id,
-            paymentStatus: "paid",
-            paidAt: new Date(),
+      // -----------------------------
+      // 7. Check amount
+      // -----------------------------
+      const parcelAmount = Number(parcel.cost);
+      const paidAmount = Number(validationResponse.amount);
+
+      if (parcelAmount !== paidAmount) {
+        return res.status(400).send({
+          success: false,
+          message: "Payment amount mismatch",
+        });
+      }
+
+      // -----------------------------
+      // 8. Check if already paid
+      // -----------------------------
+      const existingPayment =
+        await paymentCollection.findOne({
+          transactionId: tranId,
+        });
+
+      // -----------------------------
+      // 9. Payment date
+      // -----------------------------
+      const paidAt = new Date();
+
+      // -----------------------------
+      // 10. Update parcel
+      // -----------------------------
+      const parcelUpdate =
+        await parcelsCollection.updateOne(
+          {
+            _id: new ObjectId(value_a),
+            paymentStatus: { $ne: "paid" },
           },
-        }
-      );
+          {
+            $set: {
+              paymentStatus: "paid",
 
-      console.log("Update result:", result);
+              paymentGateway: "sslcommerz",
 
+              transactionId: tranId,
+
+              sslValId: val_id,
+
+              sslStatus: validationResponse.status,
+
+              sslBankTranId: bank_tran_id,
+
+              paidAmount: paidAmount,
+
+              paidAt: paidAt,
+            },
+          }
+        );
+      console.log("PARCEL UPDATED:", parcelUpdate);
+
+      // -----------------------------
+      // 11. Insert payment
+      // -----------------------------
+      const paymentData = {
+        parcelId: value_a,
+
+        transactionId: tranId,
+
+        amount: paidAmount,
+
+        currency: "BDT",
+
+        paymentMethod: "sslcommerz",
+
+        paymentStatus: "paid",
+
+        sslValId: val_id,
+
+        sslStatus: validationResponse.status,
+
+        sslBankTranId: bank_tran_id,
+
+        paidAt: paidAt,
+      };
+
+      const paymentResult =
+        await paymentCollection.insertOne(
+          paymentData
+        );
+
+      console.log("PAYMENT INSERTED:", paymentResult);
+
+
+      // -----------------------------
+      // 12. Redirect React
+      // -----------------------------
       res.redirect(
         `${process.env.SITE_DOMAIN}/dashboard/payment/success/${tranId}`
       );
     });
 
 
-    app.patch("/payment/success/:tranId", async (req, res) => {
-      const tranId = req.params.tranId;
 
-      console.log("SSL transaction:", tranId);
 
-      // Find payment
-      // Verify SSLCommerz
-      // Update payment
-      // Update parcel
 
-      res.send({
-        transactionId: tranId,
-        trackingId: "YOUR_TRACKING_ID",
-      });
+    app.post("/payment/ipn", async (req, res) => {
+      try {
+        console.log("========== IPN ==========");
+        console.log(req.body);
+
+        const {
+          val_id,
+          value_a,
+          tran_id,
+          bank_tran_id,
+        } = req.body;
+
+        // -----------------------------
+        // 1. Check val_id
+        // -----------------------------
+        if (!val_id) {
+          return res.status(400).send({
+            message: "Validation ID missing",
+          });
+        }
+
+        // -----------------------------
+        // 2. Check parcel ID
+        // -----------------------------
+        if (!value_a || !ObjectId.isValid(value_a)) {
+          return res.status(400).send({
+            message: "Invalid parcel ID",
+          });
+        }
+
+        // -----------------------------
+        // 3. Find parcel
+        // -----------------------------
+        const parcel = await parcelsCollection.findOne({
+          _id: new ObjectId(value_a),
+        });
+
+        if (!parcel) {
+          return res.status(404).send({
+            message: "Parcel not found",
+          });
+        }
+
+        // -----------------------------
+        // 4. Validate with SSLCommerz
+        // -----------------------------
+        const sslcz = new SSLCommerzPayment(
+          store_id,
+          store_passwd,
+          is_live
+        );
+
+        const validationResponse =
+          await sslcz.validate({
+            val_id,
+          });
+
+        console.log(
+          "IPN VALIDATION:",
+          validationResponse
+        );
+
+        // -----------------------------
+        // 5. Check validation
+        // -----------------------------
+        if (
+          validationResponse.status !== "VALID" &&
+          validationResponse.status !== "VALIDATED"
+        ) {
+          return res.status(400).send({
+            message: "Payment validation failed",
+          });
+        }
+
+        // -----------------------------
+        // 6. Check amount
+        // -----------------------------
+        const parcelAmount = Number(parcel.cost);
+
+        const paidAmount = Number(
+          validationResponse.amount
+        );
+
+        if (parcelAmount !== paidAmount) {
+          return res.status(400).send({
+            message: "Payment amount mismatch",
+          });
+        }
+
+        // -----------------------------
+        // 7. Check existing payment
+        // -----------------------------
+        const existingPayment =
+          await paymentCollection.findOne({
+            transactionId: tran_id,
+          });
+
+        // -----------------------------
+        // 8. Update parcel
+        // -----------------------------
+        await parcelsCollection.updateOne(
+          {
+            _id: new ObjectId(value_a),
+          },
+          {
+            $set: {
+              paymentStatus: "paid",
+
+              paymentGateway: "sslcommerz",
+
+              transactionId: tran_id,
+
+              sslValId: val_id,
+
+              sslStatus: validationResponse.status,
+
+              sslBankTranId: bank_tran_id,
+
+              paidAmount: paidAmount,
+
+              paidAt: new Date(),
+            },
+          }
+        );
+
+        console.log("PARCEL UPDATED FROM IPN");
+
+        // -----------------------------
+        // 9. Insert payment
+        // -----------------------------
+        if (!existingPayment) {
+          const paymentData = {
+            parcelId: value_a,
+
+            transactionId: tran_id,
+
+            amount: paidAmount,
+
+            currency: "BDT",
+
+            paymentMethod: "sslcommerz",
+
+            paymentStatus: "paid",
+
+            sslValId: val_id,
+
+            sslStatus: validationResponse.status,
+
+            sslBankTranId: bank_tran_id,
+
+            paidAt: new Date(),
+          };
+
+          await paymentCollection.insertOne(
+            paymentData
+          );
+
+          console.log(
+            "PAYMENT INSERTED FROM IPN"
+          );
+        } else {
+          console.log(
+            "PAYMENT ALREADY EXISTS"
+          );
+        }
+
+        // -----------------------------
+        // 10. Response
+        // -----------------------------
+        res.status(200).send(
+          "IPN processed successfully"
+        );
+      } catch (error) {
+        console.error(
+          "IPN ERROR:",
+          error
+        );
+
+        res.status(500).send({
+          message: "IPN processing failed",
+        });
+      }
+    });
+
+    app.post("/payment/fail", async (req, res) => {
+
+      console.log(
+        "PAYMENT FAILED:",
+        req.body
+      );
+
+      res.redirect(
+        `${process.env.SITE_DOMAIN}/dashboard/payment/cancelled`
+      );
+
     });
 
 
