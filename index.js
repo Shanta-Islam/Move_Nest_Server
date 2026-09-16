@@ -6,6 +6,18 @@ const app = express();
 require("dotenv").config();
 const { MongoClient, ServerApiVersion } = require("mongodb");
 const port = process.env.PORT || 3000;
+const admin = require("firebase-admin");
+// const serviceAccount = require("./move-nest-aaaba-firebase-adminsdk-fbsvc-3ab9ff17fa.json")
+
+// const serviceAccount = require("./firebase-admin-key.json");
+
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
+const serviceAccount = JSON.parse(decoded);
+
+admin.initializeApp({
+  credential:  admin.credential.cert(serviceAccount)
+})
+
 const { ObjectId } = require("mongodb");
 const SSLCommerzPayment = require('sslcommerz-lts')
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
@@ -822,10 +834,10 @@ async function run() {
 
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!",
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!",
+    // );
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
