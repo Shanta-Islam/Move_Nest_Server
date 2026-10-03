@@ -1,3 +1,5 @@
 node_modules
 .env
 move-nest-aaaba-firebase-adminsdk-fbsvc-3ab9ff17fa.json
+.vercel
+.env*

@@ -1,32 +1,58 @@
+// ========================================
+// Imports & Configuration
+// ========================================
+
 const dns = require("dns");
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
+
 const express = require("express");
 const cors = require("cors");
 const app = express();
+
 require("dotenv").config();
+
 const { MongoClient, ServerApiVersion } = require("mongodb");
-const port = process.env.PORT || 3000;
+const { ObjectId } = require("mongodb");
+
+
 const admin = require("firebase-admin");
-// const serviceAccount = require("./move-nest-aaaba-firebase-adminsdk-fbsvc-3ab9ff17fa.json")
+const { getAuth } = require("firebase-admin/auth");
 
-// const serviceAccount = require("./firebase-admin-key.json");
+const SSLCommerzPayment = require('sslcommerz-lts')
+const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
+const crypto = require("crypto");
+
+// ========================================
+// Server Configuration
+// ========================================
+
+const port = process.env.PORT || 3000;
+
+
+// ========================================
+// Firebase Admin Configuration
+// ========================================
 const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
 const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
-  credential:  admin.credential.cert(serviceAccount)
+  credential: admin.cert(serviceAccount)
 })
 
-const { ObjectId } = require("mongodb");
-const SSLCommerzPayment = require('sslcommerz-lts')
-const stripe = require("stripe")(process.env.STRIPE_SECRET);
+
+// ========================================
+// Payment Configuration
+// ========================================
 
 const store_id = process.env.STORE_ID;
 const store_passwd = process.env.STORE_PASS;
 const is_live = false
 
-const crypto = require("crypto");
+
+// ========================================
+// Tracking ID Generator
+// ========================================
 
 const generateTrackingId = () => {
   const date = new Date()
@@ -43,17 +69,46 @@ const generateTrackingId = () => {
 console.log(generateTrackingId());
 
 
+// ========================================
+// Middleware
+// ========================================
 
-
-
-//middleware
 app.use(express.json());
 app.use(cors());
 app.use(express.urlencoded({ extended: true }))
 
+
+// ========================================
+// Firebase Authentication Middleware
+// ========================================
+
+const verifyFBToken = async (req, res, next) => {
+  const token = req.headers?.authorization;
+  if (!token) {
+    return res.status(401).send({ message: "unauthorized access" })
+  }
+  try {
+    const idToken = token.split(' ')[1];
+    const decoded = await getAuth().verifyIdToken(idToken);
+    console.log("decoded in the token", decoded);
+    req.decoded_email = decoded.email;
+    next();
+  }
+  catch (err) {
+    console.log("Token verification failed:", err);
+
+    return res.status(401).send({
+      message: "Unauthorized access",
+    });
+  }
+}
+
+// ========================================
+// MongoDB Configuration
+// ========================================
+
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.onvejqf.mongodb.net/?appName=Cluster0`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -62,6 +117,9 @@ const client = new MongoClient(uri, {
   },
 });
 
+// ========================================
+// Database
+// ========================================
 
 async function run() {
   try {
@@ -69,82 +127,66 @@ async function run() {
     await client.connect();
 
     const db = client.db("moveNestDB");
+    const userCollection = db.collection("users");
     const parcelsCollection = db.collection("parcels");
-    const paymentCollection = db.collection("payments")
+    const paymentCollection = db.collection("payments");
+    const ridersCollection = db.collection("riders");
 
 
-    const validateAndUpdatePayment = async ({
-      val_id,
-      value_a,
-      tran_id,
-      bank_tran_id,
-    }) => {
-      if (!val_id) {
-        throw new Error("Validation ID missing");
+    // ========================================
+    // Users APIs
+    // ========================================
+
+    app.get("/users", verifyFBToken, async (req, res) => {
+      const cursor = userCollection.find();
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+
+    app.get("/users/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await userCollection.findOne(query);
+      res.send(result);
+    });
+
+    app.get("/users/:email/role", async (req, res) => {
+      const email = req.params.email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+      res.send({ role: user?.role || "user" })
+    });
+
+    app.post("/users", async (req, res) => {
+      const user = req.body;
+      user.role = "user";
+      user.createdAt = new Date();
+      const email = user.email;
+      const userExists = await userCollection.findOne({ email })
+      if (userExists) {
+        return res.send({ message: 'user exists' })
       }
+      const result = await userCollection.insertOne(user);
+      res.send(result);
+    })
 
-      if (!value_a) {
-        throw new Error("Parcel ID missing");
-      }
-
-      if (!ObjectId.isValid(value_a)) {
-        throw new Error("Invalid parcel ID");
-      }
-
-      const sslcz = new SSLCommerzPayment(
-        store_id,
-        store_passwd,
-        is_live
-      );
-
-      const validationResponse = await sslcz.validate({
-        val_id,
-      });
-
-      console.log(
-        "Validation Response:",
-        validationResponse
-      );
-
-      if (
-        validationResponse.status !== "VALID" &&
-        validationResponse.status !== "VALIDATED"
-      ) {
-        throw new Error("Payment validation failed");
-      }
-
-      const result = await parcelsCollection.updateOne(
-        {
-          _id: new ObjectId(value_a),
-        },
-        {
-          $set: {
-            paymentStatus: "paid",
-
-            transactionId: tran_id,
-
-            sslValId: val_id,
-
-            sslStatus:
-              validationResponse.status,
-
-            sslBankTranId:
-              bank_tran_id || null,
-
-            paidAt: new Date(),
-          },
+    app.patch("/users/:id", async (req, res) => {
+      const id = req.params.id;
+      const roleInfo = req.body;
+      const query = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          role: roleInfo.role
         }
-      );
+      }
+      const result = await userCollection.updateOne(query, updatedDoc);
+      res.send(result);
+    })
 
-      console.log(
-        "Database Update:",
-        result
-      );
+    // ========================================
+    // Parcel APIs
+    // ========================================
 
-      return validationResponse;
-    };
-
-    ////parcel api
     app.get("/parcels", async (req, res) => {
       const query = {};
       const { email } = req.query;
@@ -183,14 +225,23 @@ async function run() {
     });
 
 
-    ////payment related api
-    app.get("/payments", async (req, res) => {
+    // ========================================
+    // Payment APIs
+    // ========================================
+
+    app.get("/payments", verifyFBToken, async (req, res) => {
       const email = req.query.email;
       const query = {};
+
       if (email) {
         query.customerEmail = email;
+
+        //check email address 
+        if (email !== req.decoded_email) {
+          return res.status(403).send({ message: "Forbidden access" })
+        }
       }
-      const cursor = paymentCollection.find(query);
+      const cursor = paymentCollection.find(query).sort({ paidAt: -1 });
       const result = await cursor.toArray();
       res.send(result);
     })
@@ -212,7 +263,10 @@ async function run() {
       res.send(result);
     });
 
-    //payment related api--sslcommerz
+    // ========================================
+    // SSLCommerz Payment
+    // ========================================
+
     app.post("/sslcommerz-payment", async (req, res) => {
       const paymentInfo = req.body;
       const tran_id = crypto.randomBytes(16).toString("hex");
@@ -279,61 +333,6 @@ async function run() {
         transactionId: tran_id,
       });
     });
-
-
-    // app.post("/payment/success/:tranId", async (req, res) => {
-    //   try {
-    //     const tranId = req.params.tranId;
-    //     console.log({ sslData: req.body });
-
-    //     const {
-    //       val_id,
-    //       status,
-    //       value_a,
-    //       amount,
-    //       currency,
-    //       bank_tran_id,
-    //     } = req.body;
-
-    //     console.log("SSLCommerz payment successful");
-    //     console.log("Transaction ID:", tranId);
-    //     console.log("Validation ID:", val_id);
-    //     console.log("Status:", status);
-    //     const parcelId = req.body.value_a;
-
-    //     const query = {
-    //       _id: new ObjectId(parcelId),
-    //     };
-
-    //     console.log("QUERY:", query);
-
-    //     const result = await parcelsCollection.updateOne(
-    //       query,
-    //       {
-    //         $set: {
-    //           transactionId: tranId,
-    //           sslValId: req.body.val_id,
-    //           sslStatus: req.body.status,
-    //           sslBankTranId: req.body.bank_tran_id,
-    //           paymentStatus: "paid",
-    //         },
-    //       }
-    //     );
-
-    //     console.log("RESULT:", result);
-
-    //     res.redirect(
-    //       `${process.env.SITE_DOMAIN}/dashboard/payment/success/${tranId}`
-    //     );
-    //   } catch (error) {
-    //     console.error(error);
-
-    //     res.status(500).send({
-    //       message: "Something went wrong",
-    //     });
-    //   }
-    // });
-
 
     app.post("/payment/success/:tranId", async (req, res) => {
       const tranId = req.params.tranId;
@@ -460,7 +459,14 @@ async function run() {
       const paidAt = new Date();
 
       // -----------------------------
-      // 10. Update parcel
+      // 10. Tracking ID
+      // -----------------------------
+      const trackingId = generateTrackingId();
+
+      console.log("TRACKING ID:", trackingId);
+
+      // -----------------------------
+      // 11. Update parcel
       // -----------------------------
       const parcelUpdate =
         await parcelsCollection.updateOne(
@@ -475,6 +481,8 @@ async function run() {
               paymentGateway: "sslcommerz",
 
               transactionId: tranId,
+
+              trackingId: trackingId,
 
               sslValId: val_id,
 
@@ -491,12 +499,18 @@ async function run() {
       console.log("PARCEL UPDATED:", parcelUpdate);
 
       // -----------------------------
-      // 11. Insert payment
+      // 12. Insert payment
       // -----------------------------
       const paymentData = {
         parcelId: value_a,
 
+        parcelName: parcel.parcelName,
+
         transactionId: tranId,
+
+        trackingId: trackingId,
+
+        customerEmail: parcel.senderEmail,
 
         amount: paidAmount,
 
@@ -524,16 +538,12 @@ async function run() {
 
 
       // -----------------------------
-      // 12. Redirect React
+      // 13. Redirect React
       // -----------------------------
       res.redirect(
         `${process.env.SITE_DOMAIN}/dashboard/payment/success/${tranId}`
       );
     });
-
-
-
-
 
     app.post("/payment/ipn", async (req, res) => {
       try {
@@ -732,10 +742,10 @@ async function run() {
 
     });
 
+    // ========================================
+    // Stripe Payment
+    // ========================================
 
-
-
-    //payment related api--Stripe
     app.post("/payment-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
       const amount = parseInt(paymentInfo.cost) * 100;
@@ -773,7 +783,6 @@ async function run() {
       res.send({ url: session.url })
     });
 
-    //payment success
     app.patch("/payment-success", async (req, res) => {
       const sessionId = req.query.session_id;
       const session = await stripe.checkout.sessions.retrieve(sessionId);
@@ -831,6 +840,57 @@ async function run() {
       return res.send({ success: false })
     })
 
+    // ========================================
+    // Riders APIs
+    // ========================================
+
+    app.get("/riders", async (req, res) => {
+      const query = {};
+      if (req.query.status) {
+        query.status = req.query.status;
+      }
+      const cursor = ridersCollection.find(query);
+      const result = await cursor.toArray();
+      res.send(result);
+    })
+
+    app.post("/riders", async (req, res) => {
+      const rider = {
+        ...req.body,
+        status: "pending",
+        createdAt: new Date(),
+      };
+
+      const result = await ridersCollection.insertOne(rider);
+      console.log(result);
+
+      res.send(result);
+    })
+
+    app.patch("/riders/:id", verifyFBToken, async (req, res) => {
+      const status = req.body.status;
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          status: status
+        }
+      }
+
+      const result = await ridersCollection.updateOne(query, updatedDoc);
+      if (status === "approved") {
+        const email = req.body.email;
+        const userQuery = { email }
+        const updateUser = {
+          $set: {
+            role: "rider"
+          }
+        }
+        const userResult = await userCollection.updateOne(userQuery, updateUser);
+      }
+      res.send(result);
+    })
+
 
 
     // Send a ping to confirm a successful connection
@@ -843,12 +903,20 @@ async function run() {
     // await client.close();
   }
 }
+
 run().catch(console.dir);
+
+// ========================================
+// Root Route
+// ========================================
 
 app.get("/", (req, res) => {
   res.send("move nest server is working");
 });
 
+// ========================================
+// Start Server
+// ========================================
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
 });
