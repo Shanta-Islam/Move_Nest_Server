@@ -17,6 +17,7 @@ const { ObjectId } = require("mongodb");
 
 const admin = require("firebase-admin");
 const { getAuth } = require("firebase-admin/auth");
+const { cert } = require("firebase-admin/app");
 
 const SSLCommerzPayment = require('sslcommerz-lts')
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
@@ -37,7 +38,7 @@ const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8
 const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
-  credential: admin.cert(serviceAccount)
+  credential: cert(serviceAccount)
 })
 
 
@@ -917,8 +918,8 @@ app.get("/", (req, res) => {
 // ========================================
 // Start Server
 // ========================================
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
-});
+// app.listen(port, () => {
+//   console.log(`Example app listening on port ${port}`);
+// });
 
 module.exports = app;
