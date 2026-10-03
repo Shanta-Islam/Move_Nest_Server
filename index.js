@@ -122,10 +122,14 @@ const client = new MongoClient(uri, {
 // Database
 // ========================================
 
-async function run() {
-  try {
-    // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+// async function run() {
+//   try {
+//     // Connect the client to the server	(optional starting in v4.7)
+//     await client.connect();
+
+client.connect().then(() => {
+  console.log("Connected to MongoDB");
+}).catch(console.dir);
 
     const db = client.db("moveNestDB");
     const userCollection = db.collection("users");
@@ -899,13 +903,13 @@ async function run() {
     // console.log(
     //   "Pinged your deployment. You successfully connected to MongoDB!",
     // );
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
-  }
-}
+//   } finally {
+//     // Ensures that the client will close when you finish/error
+//     // await client.close();
+//   }
+// }
 
-run().catch(console.dir);
+// run().catch(console.dir);
 
 // ========================================
 // Root Route
@@ -918,8 +922,8 @@ app.get("/", (req, res) => {
 // ========================================
 // Start Server
 // ========================================
-// app.listen(port, () => {
-//   console.log(`Example app listening on port ${port}`);
-// });
+app.listen(port, () => {
+  console.log(`Example app listening on port ${port}`);
+});
 
 module.exports = app;
